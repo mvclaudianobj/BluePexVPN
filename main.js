@@ -3912,6 +3912,13 @@ ipcMain.handle('delete-azure-profile', async (event, profileId) => {
   }
 });
 
+function maskValue(value) {
+  const text = String(value || '');
+  if (!text) return 'not_set';
+  if (text.length <= 8) return '***configured***';
+  return `${text.slice(0, 4)}***${text.slice(-4)}`;
+}
+
 // ============ FUNÇÕES AZURE ============
 
 function parseAzureConfigFromOvpnContent(content = '') {
