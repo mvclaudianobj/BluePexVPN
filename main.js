@@ -4579,9 +4579,9 @@ ipcMain.handle('connect-openvpn', async () => {
     let replayErrorCount = 0;
     let replayErrorTimer = null;
 
-    const handleReplayStorm = async () => {
+    const handleAzureServerDisconnect = async (reason, details = {}) => {
       if (!connectionEstablished || !vpnConnectionActive) return;
-      logger.log('VPN', 'REPLAY_STORM_DISCONNECT', { replayErrorCount }, 'WARN');
+      logger.log('VPN', 'AZURE_SERVER_DISCONNECT_DETECTED', { reason, ...details }, 'WARN');
       vpnConnectionActive = false;
       stopTunnelHealthCheck();
       if (mainWindow && !mainWindow.isDestroyed()) {
@@ -4596,11 +4596,20 @@ ipcMain.handle('connect-openvpn', async () => {
       }
     };
 
+    const handleReplayStorm = () => handleAzureServerDisconnect('replay_storm', { replayErrorCount });
+
+    const isAzureServerDisconnectOutput = (text) => /Inactivity timeout \(--ping-restart\)|SIGUSR1\[soft,ping-restart\]|process restarting|Peer Connection Initiated/i.test(String(text || ''));
+
     vpnProcess.stdout.on('data', (data) => {
       const output = data.toString();
       console.log('OpenVPN Azure stdout:', output);
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('vpn-log', output);
+      }
+
+      if (connectionEstablished && isAzureServerDisconnectOutput(output)) {
+        handleAzureServerDisconnect('openvpn_restart', { output: output.slice(-500) });
+        return;
       }
 
       if (connectionEstablished && output.includes('bad packet ID (may be a replay)')) {
@@ -4637,6 +4646,11 @@ ipcMain.handle('connect-openvpn', async () => {
 
       if (isAzureConnectedOutput(errorText) && !connectionEstablished) {
         handleAzureConnected('stderr', errorText);
+        return;
+      }
+
+      if (connectionEstablished && isAzureServerDisconnectOutput(errorText)) {
+        handleAzureServerDisconnect('openvpn_restart', { output: errorText.slice(-500) });
         return;
       }
 
