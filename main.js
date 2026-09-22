@@ -1236,9 +1236,58 @@ protocol.registerSchemesAsPrivileged([
   { scheme: 'local-resource', privileges: { secure: true, standard: true, supportFetchAPI: true, corsEnabled: true } }
 ]);
 
+async function checkTunnelConnectivity(tunIface) {
+  if (process.platform !== 'linux') return { ok: true, detail: 'unsupported-platform' };
+  const { execFile, execSync } = require('child_process');
+
+  const ping = (host, iface) => new Promise((resolve) => {
+    const args = ['-c', '2', '-W', '3', '-w', '5'];
+    if (iface) args.push('-I', iface);
+    args.push(host);
+    execFile('ping', args, { timeout: 8000 }, (err, stdout) => {
+      resolve(!err && /[1-9]d*s+received/.test(stdout));
+    });
+  });
+
+  let gateway = null;
+  if (tunIface) {
+    try {
+      const out = execSync('ip route show dev ' + tunIface, { encoding: 'utf8', timeout: 3000 });
+      const m = out.match(/vias+([d.]+)/);
+      if (m) gateway = m[1];
+    } catch (_) {}
+  }
+
+  const extOk = await ping('8.8.8.8', tunIface || null);
+  if (extOk) return { ok: true, detail: 'ext_ping_ok' };
+
+  if (gateway) {
+    const gwOk = await ping(gateway, tunIface || null);
+    if (!gwOk) return { ok: false, detail: 'gw_unreachable_and_ext_unreachable' };
+    return { ok: false, detail: 'gw_ok_ext_unreachable_server_dropped' };
+  }
+
+  return { ok: false, detail: 'ext_unreachable_no_gateway' };
+}
+
+
 function startTunnelHealthCheck() {
   if (tunnelHealthCheckInterval) return;
-  tunnelHealthCheckInterval = setInterval(() => {
+
+  const declareDisconnected = (reason) => {
+    vpnConnectionActive = false;
+    if (tunnelHealthCheckInterval) {
+      clearInterval(tunnelHealthCheckInterval);
+      tunnelHealthCheckInterval = null;
+    }
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('vpn-disconnected');
+      mainWindow.webContents.send('vpn-status', 'Túnel VPN encerrado pelo servidor. Reconecte.');
+    }
+    logger.log('VPN', 'TUNNEL_HEALTH_CHECK_DISCONNECTED', { reason }, 'WARN');
+  };
+
+  tunnelHealthCheckInterval = setInterval(async () => {
     if (!vpnConnectionActive) return;
 
     const pid = getTrackedVpnPid();
@@ -1254,17 +1303,14 @@ function startTunnelHealthCheck() {
         }
         logger.log('VPN', 'TUNNEL_HEALTH_CHECK_IFACE_ORPHAN', { pid, reason: 'no_openvpn_process' }, 'WARN');
       }
+      declareDisconnected(pid ? 'process_gone' : 'pid_gone');
+      return;
+    }
 
-      vpnConnectionActive = false;
-      if (tunnelHealthCheckInterval) {
-        clearInterval(tunnelHealthCheckInterval);
-        tunnelHealthCheckInterval = null;
-      }
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('vpn-disconnected');
-        mainWindow.webContents.send('vpn-status', 'Túnel VPN encerrado pelo servidor. Reconecte.');
-      }
-      logger.log('VPN', 'TUNNEL_HEALTH_CHECK_DISCONNECTED', { pid, reason: pid ? 'process_gone' : 'pid_gone' }, 'WARN');
+    const connectivity = await checkTunnelConnectivity(activeTunInterface);
+    logger.log('VPN', 'TUNNEL_CONNECTIVITY_CHECK', { ...connectivity, tunIface: activeTunInterface });
+    if (!connectivity.ok) {
+      declareDisconnected('connectivity_failed:' + connectivity.detail);
     }
   }, 30000);
 }
@@ -1981,8 +2027,6 @@ let trafficStatsInterval = null;
 let activeHistoryEntry = null;
 let lastBytesIn = 0;
 let lastBytesOut = 0;
-let zeroRxWithTxCount = 0;
-const ZERO_RX_TX_THRESHOLD = 15;
 
 function appendConnectionHistory(entry) {
   try {
@@ -2096,8 +2140,6 @@ function startTrafficStats(profileName, profileType) {
   activeTunInterface = detectActiveTunInterface();
   lastBytesIn = 0;
   lastBytesOut = 0;
-  zeroRxWithTxCount = 0;
-
   const sendTrafficSnapshot = (stats, speedIn = 0, speedOut = 0) => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
     mainWindow.webContents.send('vpn-traffic-stats', {
@@ -2137,15 +2179,6 @@ function startTrafficStats(profileName, profileType) {
     const speedOut = Math.max(0, stats.bytesOut - lastBytesOut);
     lastBytesIn = stats.bytesIn;
     lastBytesOut = stats.bytesOut;
-    if (speedIn === 0 && speedOut > 0) {
-      zeroRxWithTxCount++;
-      if (zeroRxWithTxCount >= ZERO_RX_TX_THRESHOLD) {
-        logger.log('VPN', 'ZERO_RX_WITH_TX_DETECTED', { cycles: zeroRxWithTxCount, speedOut }, 'WARN');
-        zeroRxWithTxCount = 0;
-      }
-    } else {
-      zeroRxWithTxCount = 0;
-    }
     sendTrafficSnapshot(stats, speedIn, speedOut);
   }, 2000);
 }
