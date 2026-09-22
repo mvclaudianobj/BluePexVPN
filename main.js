@@ -2142,9 +2142,6 @@ function startTrafficStats(profileName, profileType) {
       if (zeroRxWithTxCount >= ZERO_RX_TX_THRESHOLD) {
         logger.log('VPN', 'ZERO_RX_WITH_TX_DETECTED', { cycles: zeroRxWithTxCount, speedOut }, 'WARN');
         zeroRxWithTxCount = 0;
-        if (vpnConnectionActive && typeof handleAzureServerDisconnect === 'function') {
-          handleAzureServerDisconnect('zero_rx_with_tx', { cycles: ZERO_RX_TX_THRESHOLD });
-        }
       }
     } else {
       zeroRxWithTxCount = 0;
