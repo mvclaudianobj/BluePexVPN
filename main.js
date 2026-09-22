@@ -1981,6 +1981,8 @@ let trafficStatsInterval = null;
 let activeHistoryEntry = null;
 let lastBytesIn = 0;
 let lastBytesOut = 0;
+let zeroRxWithTxCount = 0;
+const ZERO_RX_TX_THRESHOLD = 15;
 
 function appendConnectionHistory(entry) {
   try {
@@ -2094,6 +2096,7 @@ function startTrafficStats(profileName, profileType) {
   activeTunInterface = detectActiveTunInterface();
   lastBytesIn = 0;
   lastBytesOut = 0;
+  zeroRxWithTxCount = 0;
 
   const sendTrafficSnapshot = (stats, speedIn = 0, speedOut = 0) => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -2134,6 +2137,18 @@ function startTrafficStats(profileName, profileType) {
     const speedOut = Math.max(0, stats.bytesOut - lastBytesOut);
     lastBytesIn = stats.bytesIn;
     lastBytesOut = stats.bytesOut;
+    if (speedIn === 0 && speedOut > 0) {
+      zeroRxWithTxCount++;
+      if (zeroRxWithTxCount >= ZERO_RX_TX_THRESHOLD) {
+        logger.log('VPN', 'ZERO_RX_WITH_TX_DETECTED', { cycles: zeroRxWithTxCount, speedOut }, 'WARN');
+        zeroRxWithTxCount = 0;
+        if (vpnConnectionActive && typeof handleAzureServerDisconnect === 'function') {
+          handleAzureServerDisconnect('zero_rx_with_tx', { cycles: ZERO_RX_TX_THRESHOLD });
+        }
+      }
+    } else {
+      zeroRxWithTxCount = 0;
+    }
     sendTrafficSnapshot(stats, speedIn, speedOut);
   }, 2000);
 }
