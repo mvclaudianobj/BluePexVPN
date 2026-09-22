@@ -1240,29 +1240,27 @@ function startTunnelHealthCheck() {
   if (tunnelHealthCheckInterval) return;
   tunnelHealthCheckInterval = setInterval(() => {
     if (!vpnConnectionActive) return;
+
     const pid = getTrackedVpnPid();
-    if (!pid) {
+    const pidAlive = pid ? isPidAlive(pid) : false;
+
+    if (!pidAlive) {
+      const ifaceState = detectLocalVpnInterfaceState();
+      if (ifaceState.connected) {
+        logger.log('VPN', 'TUNNEL_HEALTH_CHECK_PID_GONE_IFACE_OK', { pid, reason: 'pkexec_wrapper_ended' }, 'WARN');
+        return;
+      }
+
       vpnConnectionActive = false;
-      tunnelHealthCheckInterval && clearInterval(tunnelHealthCheckInterval);
-      tunnelHealthCheckInterval = null;
+      if (tunnelHealthCheckInterval) {
+        clearInterval(tunnelHealthCheckInterval);
+        tunnelHealthCheckInterval = null;
+      }
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('vpn-disconnected');
         mainWindow.webContents.send('vpn-status', 'Túnel VPN encerrado pelo servidor. Reconecte.');
       }
-      logger.log('VPN', 'TUNNEL_HEALTH_CHECK_DISCONNECTED', { reason: 'pid_gone' }, 'WARN');
-      return;
-    }
-    try {
-      process.kill(pid, 0);
-    } catch (_) {
-      vpnConnectionActive = false;
-      clearInterval(tunnelHealthCheckInterval);
-      tunnelHealthCheckInterval = null;
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('vpn-disconnected');
-        mainWindow.webContents.send('vpn-status', 'Túnel VPN encerrado pelo servidor. Reconecte.');
-      }
-      logger.log('VPN', 'TUNNEL_HEALTH_CHECK_DISCONNECTED', { pid, reason: 'process_gone' }, 'WARN');
+      logger.log('VPN', 'TUNNEL_HEALTH_CHECK_DISCONNECTED', { pid, reason: pid ? 'process_gone' : 'pid_gone' }, 'WARN');
     }
   }, 30000);
 }
