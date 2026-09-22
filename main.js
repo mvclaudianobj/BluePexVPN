@@ -4257,6 +4257,7 @@ ipcMain.handle('connect-openvpn', async () => {
       openvpnArgs.push('--pull-filter', 'ignore', 'comp-lzo');
       openvpnArgs.push('--pull-filter', 'ignore', 'compress');
     }
+    openvpnArgs.push('--mute-replay-warnings');
     let openvpnCommand;
     let openvpnArgsFinal;
 
@@ -4576,11 +4577,38 @@ ipcMain.handle('connect-openvpn', async () => {
       }
     }, 120000);
 
+    let replayErrorCount = 0;
+    let replayErrorTimer = null;
+
+    const handleReplayStorm = () => {
+      if (!connectionEstablished || !vpnConnectionActive) return;
+      vpnConnectionActive = false;
+      stopTunnelHealthCheck();
+      if (vpnProcess && !vpnProcess.killed) {
+        try { vpnProcess.kill('SIGTERM'); } catch (_) {}
+      }
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('vpn-disconnected');
+        mainWindow.webContents.send('vpn-status', 'Conexão encerrada pelo servidor. Reconecte.');
+      }
+      logger.log('VPN', 'REPLAY_STORM_DISCONNECT', { replayErrorCount }, 'WARN');
+    };
+
     vpnProcess.stdout.on('data', (data) => {
       const output = data.toString();
       console.log('OpenVPN Azure stdout:', output);
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('vpn-log', output);
+      }
+
+      if (connectionEstablished && output.includes('bad packet ID (may be a replay)')) {
+        replayErrorCount++;
+        if (replayErrorTimer) clearTimeout(replayErrorTimer);
+        replayErrorTimer = setTimeout(() => { replayErrorCount = 0; }, 10000);
+        if (replayErrorCount >= 5) {
+          handleReplayStorm();
+          return;
+        }
       }
 
       if (isAzureConnectedOutput(output) && !connectionEstablished) {
@@ -4619,6 +4647,14 @@ ipcMain.handle('connect-openvpn', async () => {
       } else if (errorText.includes('AUTH_FAILED')) {
         handleAzureAuthFailure('stderr');
         return;
+      } else if (connectionEstablished && errorText.includes('bad packet ID (may be a replay)')) {
+        replayErrorCount++;
+        if (replayErrorTimer) clearTimeout(replayErrorTimer);
+        replayErrorTimer = setTimeout(() => { replayErrorCount = 0; }, 10000);
+        if (replayErrorCount >= 5) {
+          handleReplayStorm();
+          return;
+        }
       } else if (errorText.trim()) {
         lastErrorOutput = errorText.trim().split('\n').pop();
       }
