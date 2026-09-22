@@ -3940,7 +3940,64 @@ ipcMain.handle('delete-azure-profile', async (event, profileId) => {
 
 // ============ FUNÇÕES AZURE EXISTENTES ============
 
+function extractAzureTagsFromOvpnContent(ovpnContent) {
+  const result = {};
+  const regex = /^\s*#AZURE:\s*([^=\s]+)\s*=\s*(.+?)\s*$/gim;
+  let match;
+  while ((match = regex.exec(ovpnContent)) !== null) {
+    result[match[1].trim().toLowerCase()] = match[2].trim();
+  }
+  return result;
+}
+
+async function refreshPcaFromActiveOvpn() {
+  try {
+    let ovpnPath = config.openvpn_config;
+
+    if (!ovpnPath || !fs.existsSync(ovpnPath)) {
+      try {
+        const profiles = JSON.parse(fs.readFileSync(AZURE_PROFILES_PATH, 'utf-8'));
+        if (Array.isArray(profiles) && profiles.length > 0) {
+          const found = profiles.find(p => p.ovpnFile && fs.existsSync(p.ovpnFile));
+          if (found) {
+            ovpnPath = found.ovpnFile;
+            config.openvpn_config = ovpnPath;
+            logger.log('AZURE', 'PCA_REFRESH_PATH_RESOLVED', { ovpnPath });
+          }
+        }
+      } catch (_) {}
+    }
+
+    if (!ovpnPath || !fs.existsSync(ovpnPath)) return;
+
+    const ovpnContent = fs.readFileSync(ovpnPath, 'utf-8');
+    const tags = extractAzureTagsFromOvpnContent(ovpnContent);
+    if (!tags.client_id || !tags.tenant_id) return;
+    if (tags.client_id === config.client_id && tags.tenant_id === config.tenant_id) return;
+
+    config.client_id = tags.client_id;
+    config.tenant_id = tags.tenant_id;
+    if (tags.scope) config.scope = tags.scope;
+    if (tags.server_api) config.server_api = tags.server_api;
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+
+    pca = new PublicClientApplication({
+      auth: {
+        clientId: config.client_id,
+        authority: `https://login.microsoftonline.com/${config.tenant_id}`,
+      }
+    });
+    logger.log('AZURE', 'PCA_REFRESHED_FROM_OVPN', {
+      clientId: config.client_id,
+      tenantId: config.tenant_id
+    });
+  } catch (e) {
+    logger.log('AZURE', 'PCA_REFRESH_WARN', { error: e.message }, 'WARN');
+  }
+}
+
 ipcMain.handle('login-azure', async () => {
+  await refreshPcaFromActiveOvpn();
   logger.log('AZURE', 'LOGIN_START', { scopes: config.scope });
 
   const request = {
