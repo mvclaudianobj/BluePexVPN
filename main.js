@@ -4902,33 +4902,34 @@ async function killVPNConnection() {
       // vpnProcess.kill('SIGTERM') entrega SIGTERM diretamente ao openvpn
       if (vpnProcess && !vpnProcess.killed) {
         console.log(`🔌 [KILL-1] PASSO 1 (direct): vpnProcess.kill(SIGTERM) PID=${vpnProcess.pid} — openvpn direto, enviando explicit-exit-notify`);
+        const directPid = bluepexPid || vpnProcess.pid;
+        let killOk = false;
+        let killMethod = 'process.kill';
+        let killErr = null;
         try {
-          const directPid = bluepexPid || vpnProcess.pid;
           vpnProcess.kill('SIGTERM');
-          logger.log('CONNECTION', 'DISCONNECT_SIGTERM_SENT', {
-            pid: directPid,
-            wrapperPid,
-            method: 'process.kill',
-            ok: true,
-            error: null,
-            stderr: null,
-            ovpnPath,
-            purpose: 'explicit_exit_notify_udp'
-          });
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('vpn-log', `🔌 SIGTERM enviado ao OpenVPN PID ${directPid} para notificar o servidor UDP\n`);
-          }
+          killOk = true;
         } catch (e) {
-          console.log(`⚠️ vpnProcess TERM (direct): ${e.message}`);
-          logger.log('CONNECTION', 'DISCONNECT_SIGTERM_FAILED', {
-            pid: bluepexPid || vpnProcess.pid,
-            wrapperPid,
-            method: 'process.kill',
-            error: e.message,
-            stderr: null,
-            ovpnPath,
-            purpose: 'explicit_exit_notify_udp'
-          }, 'ERROR');
+          killErr = e.message;
+          if (e.code === 'EPERM') {
+            const elevated = await sudoKillPid(directPid, 'SIGTERM');
+            killOk = elevated.ok;
+            killMethod = elevated.method || 'pkexec';
+            if (!killOk) killErr = elevated.error;
+          }
+        }
+        logger.log('CONNECTION', 'DISCONNECT_SIGTERM_SENT', {
+          pid: directPid,
+          wrapperPid,
+          method: killMethod,
+          ok: killOk,
+          error: killErr,
+          stderr: null,
+          ovpnPath,
+          purpose: 'explicit_exit_notify_udp'
+        });
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('vpn-log', `🔌 SIGTERM enviado ao OpenVPN PID ${directPid} para notificar o servidor UDP\n`);
         }
       }
       console.log('🔌 [KILL-1] Aguardando 8000ms para explicit-exit-notify (conexão direta)...');
