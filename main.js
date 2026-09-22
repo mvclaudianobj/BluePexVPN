@@ -1247,8 +1247,12 @@ function startTunnelHealthCheck() {
     if (!pidAlive) {
       const ifaceState = detectLocalVpnInterfaceState();
       if (ifaceState.connected) {
-        logger.log('VPN', 'TUNNEL_HEALTH_CHECK_PID_GONE_IFACE_OK', { pid, reason: 'pkexec_wrapper_ended' }, 'WARN');
-        return;
+        const anyOpenvpn = isAnyOpenVpnProcessRunning();
+        if (anyOpenvpn) {
+          logger.log('VPN', 'TUNNEL_HEALTH_CHECK_PID_GONE_IFACE_OK', { pid, reason: 'pkexec_wrapper_ended' }, 'WARN');
+          return;
+        }
+        logger.log('VPN', 'TUNNEL_HEALTH_CHECK_IFACE_ORPHAN', { pid, reason: 'no_openvpn_process' }, 'WARN');
       }
 
       vpnConnectionActive = false;
@@ -5488,6 +5492,25 @@ function isPidAlive(pid) {
 
     process.kill(pidNumber, 0);
     return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function isAnyOpenVpnProcessRunning() {
+  try {
+    if (process.platform === 'win32') {
+      const out = require('child_process').execSync(
+        'tasklist /FI "IMAGENAME eq openvpn.exe" /FO CSV /NH',
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }
+      ).trim();
+      return !!out && !out.includes('No tasks are running') && out.toLowerCase().includes('openvpn.exe');
+    }
+    const out = require('child_process').execSync(
+      'pgrep -x openvpn || pgrep -f openvpn',
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], shell: true }
+    ).trim();
+    return out.length > 0;
   } catch (_) {
     return false;
   }
