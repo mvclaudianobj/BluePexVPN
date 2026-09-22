@@ -4257,7 +4257,6 @@ ipcMain.handle('connect-openvpn', async () => {
       openvpnArgs.push('--pull-filter', 'ignore', 'comp-lzo');
       openvpnArgs.push('--pull-filter', 'ignore', 'compress');
     }
-    openvpnArgs.push('--mute-replay-warnings');
     let openvpnCommand;
     let openvpnArgsFinal;
 
@@ -4580,18 +4579,21 @@ ipcMain.handle('connect-openvpn', async () => {
     let replayErrorCount = 0;
     let replayErrorTimer = null;
 
-    const handleReplayStorm = () => {
+    const handleReplayStorm = async () => {
       if (!connectionEstablished || !vpnConnectionActive) return;
+      logger.log('VPN', 'REPLAY_STORM_DISCONNECT', { replayErrorCount }, 'WARN');
       vpnConnectionActive = false;
       stopTunnelHealthCheck();
-      if (vpnProcess && !vpnProcess.killed) {
-        try { vpnProcess.kill('SIGTERM'); } catch (_) {}
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('vpn-status', 'Conexão encerrada pelo servidor. Desconectando...');
       }
+      try {
+        await killVPNConnection();
+      } catch (_) {}
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('vpn-disconnected');
         mainWindow.webContents.send('vpn-status', 'Conexão encerrada pelo servidor. Reconecte.');
       }
-      logger.log('VPN', 'REPLAY_STORM_DISCONNECT', { replayErrorCount }, 'WARN');
     };
 
     vpnProcess.stdout.on('data', (data) => {
