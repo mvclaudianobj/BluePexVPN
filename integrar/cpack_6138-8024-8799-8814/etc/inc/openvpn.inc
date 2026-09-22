@@ -1290,6 +1290,7 @@ function openvpn_reconfigure($mode, $settings) {
 
 					if ($settings['authmode'] == $auth_type) {
 						$conf .= openvpn_authscriptE_string($settings['authmode'], $strictusercn, $mode_id, $settings['local_port']);
+						$conf .= "push \"reneg-sec 0\"\n";
 					} else {
 						$conf .= openvpn_authscript_string($settings['authmode'], $strictusercn, $mode_id, $settings['local_port']);
 					}
