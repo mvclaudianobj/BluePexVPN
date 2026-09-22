@@ -864,6 +864,7 @@ let currentOvpnPath = null;
 let vpnProcess = null;
 let vpnConnectionActive = false;
 let currentConnectionMeta = null;
+let tunnelHealthCheckInterval = null;
 let suppressNextReconnect = false;
 let currentLocalChallengeContext = null;
 
@@ -1233,6 +1234,45 @@ const { protocol } = require('electron');
 protocol.registerSchemesAsPrivileged([
   { scheme: 'local-resource', privileges: { secure: true, standard: true, supportFetchAPI: true, corsEnabled: true } }
 ]);
+
+function startTunnelHealthCheck() {
+  if (tunnelHealthCheckInterval) return;
+  tunnelHealthCheckInterval = setInterval(() => {
+    if (!vpnConnectionActive) return;
+    const pid = getTrackedVpnPid();
+    if (!pid) {
+      vpnConnectionActive = false;
+      tunnelHealthCheckInterval && clearInterval(tunnelHealthCheckInterval);
+      tunnelHealthCheckInterval = null;
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('vpn-disconnected');
+        mainWindow.webContents.send('vpn-status', 'Túnel VPN encerrado pelo servidor. Reconecte.');
+      }
+      logger.log('VPN', 'TUNNEL_HEALTH_CHECK_DISCONNECTED', { reason: 'pid_gone' }, 'WARN');
+      return;
+    }
+    try {
+      process.kill(pid, 0);
+    } catch (_) {
+      vpnConnectionActive = false;
+      clearInterval(tunnelHealthCheckInterval);
+      tunnelHealthCheckInterval = null;
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('vpn-disconnected');
+        mainWindow.webContents.send('vpn-status', 'Túnel VPN encerrado pelo servidor. Reconecte.');
+      }
+      logger.log('VPN', 'TUNNEL_HEALTH_CHECK_DISCONNECTED', { pid, reason: 'process_gone' }, 'WARN');
+    }
+  }, 30000);
+}
+
+function stopTunnelHealthCheck() {
+  if (tunnelHealthCheckInterval) {
+    clearInterval(tunnelHealthCheckInterval);
+    tunnelHealthCheckInterval = null;
+  }
+}
+
 
 app.on('ready', () => {
   protocol.registerFileProtocol('local-resource', (request, callback) => {
@@ -2701,6 +2741,7 @@ ipcMain.handle('connect-openvpn-userpass-profile', async (event, profileId, user
              }
 
              mainWindow.webContents.send('vpn-connected', { pid: bluepexPid });
+             startTunnelHealthCheck();
              resolveOnce({ pid: bluepexPid });
 
             if (connectionTimeout) clearTimeout(connectionTimeout);
@@ -2824,6 +2865,8 @@ ipcMain.handle('connect-openvpn-userpass-profile', async (event, profileId, user
             }
              if (wasEstablished && mainWindow && !mainWindow.isDestroyed()) {
                if (killSwitchEnabled && !suppressNextReconnect) { enableKillSwitch().catch(() => {}); }
+               stopTunnelHealthCheck();
+
                mainWindow.webContents.send('vpn-disconnected');
              }
 
@@ -3914,7 +3957,7 @@ ipcMain.handle('login-azure', async () => {
     } else if (typeof response.expiresOn === 'number') {
       expiresAtIso = new Date(response.expiresOn * 1000).toISOString();
     } else {
-      expiresAtIso = new Date(Date.now() + 3600 * 1000).toISOString();
+      expiresAtIso = new Date(Date.now() + 86400 * 1000).toISOString();
     }
 
     const cache = {
@@ -3993,11 +4036,35 @@ ipcMain.handle('publish-token', async (event, username, token) => {
   }
 });
 
+async function renewShortIdIfNeeded(cache) {
+  const SHORT_ID_TTL_MS = 8 * 60 * 60 * 1000;
+  const RENEW_MARGIN_MS = 30 * 60 * 1000;
+  const generatedAt = cache.short_id_generated_at ? new Date(cache.short_id_generated_at).getTime() : 0;
+  const age = Date.now() - generatedAt;
+  if (!cache.short_id || !cache.access_token || !config.server_api) return;
+  if (age < SHORT_ID_TTL_MS - RENEW_MARGIN_MS) return;
+  try {
+    logger.log('AZURE', 'SHORT_ID_RENEW_START', { age: Math.round(age / 60000) + 'min', username: cache.username });
+    const resp = await axios.post(config.server_api, { username: cache.username, jwt_token: cache.access_token });
+    const newShortId = resp?.data?.short_id || resp?.data?.shortID || resp?.data?.data?.short_id || '';
+    if (newShortId) {
+      cache.short_id = newShortId;
+      cache.shortID = newShortId;
+      cache.short_id_generated_at = new Date().toISOString();
+      writeTokenCache(cache);
+      logger.log('AZURE', 'SHORT_ID_RENEW_OK', { username: cache.username });
+    }
+  } catch (e) {
+    logger.log('AZURE', 'SHORT_ID_RENEW_WARN', { error: e.message }, 'WARN');
+  }
+}
+
+
 ipcMain.handle('connect-openvpn', async () => {
   suppressNextReconnect = false;
   const connectionId = `conn_azure_${Date.now()}`;
   const pkexecAvailableGlobal = await checkPkexecAvailable();
-  return new Promise((resolve, reject) => {
+  return new Promise(async (resolve, reject) => {
     console.log(`🔗 [MAIN] connect-openvpn chamado - Timestamp: ${new Date().toISOString()}`);
 
     if (vpnProcess && !vpnProcess.killed) {
@@ -4025,6 +4092,7 @@ ipcMain.handle('connect-openvpn', async () => {
       reject(new Error('Token não encontrado. Faça login primeiro.'));
       return;
     }
+    await renewShortIdIfNeeded(cache);
 
     // Exigir short_id retornado pelo backend no publish-token
     const shortID = (cache.short_id && String(cache.short_id).trim())
@@ -4210,6 +4278,7 @@ ipcMain.handle('connect-openvpn', async () => {
       persistBluepexConnectionMeta(currentConnectionMeta);
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('vpn-connected', { pid: bluepexPid });
+        startTunnelHealthCheck();
       }
       console.log('✅ [Azure] VPN conectada com sucesso!');
       activeHistoryEntry = {
@@ -4485,6 +4554,8 @@ ipcMain.handle('connect-openvpn', async () => {
        if (wasEstablished && mainWindow && !mainWindow.isDestroyed()) {
          const manualDisconnect = suppressNextReconnect;
          if (killSwitchEnabled && !manualDisconnect) { enableKillSwitch().catch(() => {}); }
+         stopTunnelHealthCheck();
+
          mainWindow.webContents.send('vpn-disconnected');
          if (manualDisconnect) {
            console.log('🛑 [RF010] Reconexão automática Azure ignorada: desconexão manual solicitada');
@@ -4779,6 +4850,8 @@ async function killVPNConnection() {
 
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('vpn-log', '✅ VPN desconectada com sucesso\n');
+      stopTunnelHealthCheck();
+
       mainWindow.webContents.send('vpn-disconnected');
     }
 
