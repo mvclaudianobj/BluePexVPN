@@ -1258,7 +1258,7 @@ async function handleConnect() {
             try {
                 // Conexão Azure AD
                 console.log('🔐 [RENDERER] Iniciando login Azure...');
-                const authResult = await window.electronAPI.loginAzure();
+                const authResult = await window.electronAPI.loginAzure(currentProfile.id);
                 console.log('🔐 [RENDERER] Login Azure retornou:', authResult);
                 
                 if (!authResult || !authResult.token) {
@@ -1268,7 +1268,7 @@ async function handleConnect() {
                 const { token, username } = authResult;
                 showStatus(`Login realizado: ${username}`, 'status');
 
-                const publishResult = await window.electronAPI.publishToken(username, token);
+                const publishResult = await window.electronAPI.publishToken(username, token, currentProfile.id);
                 if (!publishResult || !publishResult.success) {
                     throw new Error('Falha ao publicar token no servidor');
                 }
