@@ -1,6 +1,6 @@
 {
-   "client_id": "9048af0b-7b65-44c6-ae70-e8aac67229fb",
-   "tenant_id": "10a9f605-3852-43d4-82fa-c39fe4693c69",
+   "client_id": "",
+   "tenant_id": "",
    "scope": "https://graph.microsoft.com/.default openid profile offline_access",
-   "server_api": "http://wsutm.bluepex.com:30001/publish"
+   "server_api": ""
 }

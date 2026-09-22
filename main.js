@@ -3684,7 +3684,25 @@ ipcMain.handle('save-azure-config', async (event, profileId, ovpnContent, ovpnFi
     }
 
     config.openvpn_config = path.join(processResult.profileDir, `${profileId}.ovpn`);
+    if (processResult.azureConfig?.client_id) config.client_id = processResult.azureConfig.client_id;
+    if (processResult.azureConfig?.tenant_id) config.tenant_id = processResult.azureConfig.tenant_id;
+    if (processResult.azureConfig?.scope) config.scope = processResult.azureConfig.scope;
+    if (processResult.azureConfig?.server_api) config.server_api = processResult.azureConfig.server_api;
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+
+    if (config.client_id && config.tenant_id) {
+      try {
+        pca = new PublicClientApplication({
+          auth: {
+            clientId: config.client_id,
+            authority: `https://login.microsoftonline.com/${config.tenant_id}`,
+          }
+        });
+        console.log(`🔄 MSAL PCA reinicializado com client_id do perfil importado`);
+      } catch (pcaErr) {
+        console.warn(`⚠️ Falha ao reinicializar PCA: ${pcaErr.message}`);
+      }
+    }
 
     return {
       success: true,
