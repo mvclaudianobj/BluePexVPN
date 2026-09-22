@@ -1829,6 +1829,7 @@ async function processAndCopyOvpnFiles(originalOvpnPath, profileId, baseDir = nu
               break;
           }
         }
+        processedLines.push(originalLine);
         continue;
       }
 
@@ -3650,6 +3651,7 @@ ipcMain.handle('save-azure-config', async (event, profileId, ovpnContent, ovpnFi
       azureProfiles[profileIndex].ovpnFile = path.join(processResult.profileDir, `${profileId}.ovpn`);
       azureProfiles[profileIndex].ovpnFileName = ovpnFileName;
       azureProfiles[profileIndex].profileDir = processResult.profileDir;
+      azureProfiles[profileIndex].azureConfig = processResult.azureConfig || null;
       azureProfiles[profileIndex].updatedAt = new Date().toISOString();
     } else {
       azureProfiles.push({
@@ -3658,6 +3660,7 @@ ipcMain.handle('save-azure-config', async (event, profileId, ovpnContent, ovpnFi
         ovpnFile: path.join(processResult.profileDir, `${profileId}.ovpn`),
         ovpnFileName: ovpnFileName,
         profileDir: processResult.profileDir,
+        azureConfig: processResult.azureConfig || null,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       });
