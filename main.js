@@ -4930,7 +4930,14 @@ async function killVPNConnection() {
           killOk = true;
         } catch (e) {
           killErr = e.message;
-          if (e.code === 'EPERM') {
+        }
+        // Node.js não lança EPERM em kill() — o sinal pode ser ignorado silenciosamente
+        // se o processo é root. Verificar se ainda está vivo após 1s e usar pkexec se necessário.
+        if (killOk) {
+          await sleep(1000);
+          const stillAlive = isPidAlive(directPid);
+          if (stillAlive) {
+            console.log(`⚠️ [KILL-1] PID ${directPid} ainda vivo após SIGTERM direto — tentando sudoKillPid (pkexec/sudo)`);
             const elevated = await sudoKillPid(directPid, 'SIGTERM');
             killOk = elevated.ok;
             killMethod = elevated.method || 'pkexec';
