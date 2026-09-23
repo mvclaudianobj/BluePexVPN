@@ -1296,12 +1296,21 @@ function startTunnelHealthCheck() {
     if (!pidAlive) {
       const ifaceState = detectLocalVpnInterfaceState();
       if (ifaceState.connected) {
-        const anyOpenvpn = isAnyOpenVpnProcessRunning();
-        if (anyOpenvpn) {
-          logger.log('VPN', 'TUNNEL_HEALTH_CHECK_PID_GONE_IFACE_OK', { pid, reason: 'pkexec_wrapper_ended' }, 'WARN');
+        // Tentar encontrar o PID real do openvpn (pode ter mudado após ping-restart ou pkexec)
+        const realPid = refreshTrackedBluepexPid();
+        if (realPid) {
+          logger.log('VPN', 'TUNNEL_HEALTH_CHECK_PID_UPDATED', { oldPid: pid, newPid: realPid }, 'WARN');
           return;
         }
-        logger.log('VPN', 'TUNNEL_HEALTH_CHECK_IFACE_ORPHAN', { pid, reason: 'no_openvpn_process' }, 'WARN');
+        // Nenhum PID rastreável encontrado — verificar conectividade antes de declarar desconectado
+        const connectivity = await checkTunnelConnectivity(activeTunInterface);
+        logger.log('VPN', 'TUNNEL_CONNECTIVITY_CHECK_PID_GONE', { ...connectivity, tunIface: activeTunInterface }, 'WARN');
+        if (!connectivity.ok) {
+          declareDisconnected('pid_gone_connectivity_failed:' + connectivity.detail);
+        } else {
+          logger.log('VPN', 'TUNNEL_HEALTH_CHECK_PID_GONE_IFACE_OK', { pid, reason: 'pkexec_wrapper_ended_connectivity_ok' }, 'WARN');
+        }
+        return;
       }
       declareDisconnected(pid ? 'process_gone' : 'pid_gone');
       return;
