@@ -1561,8 +1561,7 @@ function showStatus(message, type = 'status') {
     statusEl.className = `status ${type}`;
     statusEl.style.display = 'block';
 
-    // Auto-hide success messages after 5 seconds, unless connected
-    if (type === 'success' && !vpnPid) {
+    if (type === 'success') {
         setTimeout(() => {
             statusEl.style.display = 'none';
         }, 5000);
