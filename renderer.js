@@ -2483,6 +2483,25 @@ if (window.electronAPI) {
         secondaryDnsInput.addEventListener('change', saveDnsSettings);
     }
 
+    const shortIdRenewMinutesInput = document.getElementById('shortIdRenewMinutes');
+    const healthCheckMinutesInput = document.getElementById('healthCheckMinutes');
+    if ((shortIdRenewMinutesInput || healthCheckMinutesInput) && window.electronAPI?.loadAppSettings) {
+        const saveAdvancedSettings = async () => {
+            if (window.electronAPI?.saveAppSettings) {
+                await window.electronAPI.saveAppSettings({
+                    shortIdRenewMinutes: shortIdRenewMinutesInput?.value ? Number(shortIdRenewMinutesInput.value) : null,
+                    healthCheckMinutes: healthCheckMinutesInput?.value ? Number(healthCheckMinutesInput.value) : null
+                });
+            }
+        };
+        window.electronAPI.loadAppSettings().then((settings) => {
+            if (shortIdRenewMinutesInput && settings.shortIdRenewMinutes) shortIdRenewMinutesInput.value = settings.shortIdRenewMinutes;
+            if (healthCheckMinutesInput && settings.healthCheckMinutes) healthCheckMinutesInput.value = settings.healthCheckMinutes;
+        }).catch(() => {});
+        if (shortIdRenewMinutesInput) shortIdRenewMinutesInput.addEventListener('change', saveAdvancedSettings);
+        if (healthCheckMinutesInput) healthCheckMinutesInput.addEventListener('change', saveAdvancedSettings);
+    }
+
     // RF004: sessão limpa pelo processo principal (após logout)
     window.electronAPI.onSessionCleared(() => {
         vpnPid = null;

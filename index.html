@@ -1649,6 +1649,25 @@
                 </div>
             </div>
 
+
+            <!-- Avançado / Diagnóstico -->
+            <div class="config-sections-container mt-2">
+                <div class="config-section full-width">
+                    <h4><i class="bi bi-sliders"></i> Avançado</h4>
+                    <p class="mt-1" style="font-size:0.85em;color:#aaa;">Parâmetros de temporização. Deixe em branco para usar os valores padrão.</p>
+                    <div style="display:flex;flex-wrap:wrap;gap:12px;margin-top:10px;">
+                        <div style="flex:1;min-width:200px;">
+                            <label for="shortIdRenewMinutes" class="form-label">Renovação de chave de segurança (min)</label>
+                            <input type="number" id="shortIdRenewMinutes" class="form-control form-control-sm" placeholder="Padrão: 450 min (7h30)">
+                        </div>
+                        <div style="flex:1;min-width:200px;">
+                            <label for="healthCheckMinutes" class="form-label">Intervalo de verificação de conexão (min)</label>
+                            <input type="number" id="healthCheckMinutes" class="form-control form-control-sm" placeholder="Padrão: 0.5 min (30s)">
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <!-- Identidade Visual -->
             <div class="config-sections-container mt-2" style="display:none">
               <div class="config-section full-width">

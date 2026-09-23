@@ -1321,7 +1321,12 @@ function startTunnelHealthCheck() {
     if (!connectivity.ok) {
       declareDisconnected('connectivity_failed:' + connectivity.detail);
     }
-  }, 30000);
+  }, (() => {
+    const settings = loadAppSettings();
+    return settings.healthCheckMinutes && Number(settings.healthCheckMinutes) > 0
+      ? Number(settings.healthCheckMinutes) * 60 * 1000
+      : 30000;
+  })());
 }
 
 function stopTunnelHealthCheck() {
@@ -4204,8 +4209,11 @@ ipcMain.handle('publish-token', async (event, username, token, profileId) => {
 });
 
 async function renewShortIdIfNeeded(cache) {
-  const SHORT_ID_TTL_MS = 8 * 60 * 60 * 1000;
-  const RENEW_MARGIN_MS = 30 * 60 * 1000;
+  const settings = loadAppSettings();
+  const SHORT_ID_TTL_MS = settings.shortIdRenewMinutes && Number(settings.shortIdRenewMinutes) > 0
+    ? Number(settings.shortIdRenewMinutes) * 60 * 1000
+    : 8 * 60 * 60 * 1000;
+  const RENEW_MARGIN_MS = Math.min(30 * 60 * 1000, SHORT_ID_TTL_MS * 0.1);
   const generatedAt = cache.short_id_generated_at ? new Date(cache.short_id_generated_at).getTime() : 0;
   const age = Date.now() - generatedAt;
   if (!cache.short_id || !cache.access_token || !config.server_api) return;
