@@ -866,7 +866,10 @@ let vpnProcess = null;
 let vpnConnectionActive = false;
 let currentConnectionMeta = null;
 let tunnelHealthCheckInterval = null;
+let shortIdRenewalInterval = null;
+let shortIdRenewalInProgress = false;
 let suppressNextReconnect = false;
+let manualDisconnectInProgress = false;
 let currentLocalChallengeContext = null;
 
 // RF011: Kill Switch
@@ -1245,7 +1248,7 @@ async function checkTunnelConnectivity(tunIface) {
     if (iface) args.push('-I', iface);
     args.push(host);
     execFile('ping', args, { timeout: 8000 }, (err, stdout) => {
-      resolve(!err && /[1-9]d*s+received/.test(stdout));
+      resolve(!err && /[1-9]\d*\s+received/.test(stdout));
     });
   });
 
@@ -1280,9 +1283,17 @@ function startTunnelHealthCheck() {
       clearInterval(tunnelHealthCheckInterval);
       tunnelHealthCheckInterval = null;
     }
+    stopShortIdRenewalTimer();
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('vpn-disconnected');
-      mainWindow.webContents.send('vpn-status', 'Túnel VPN encerrado pelo servidor. Reconecte.');
+      const normalizedReason = String(reason || '');
+      const message = normalizedReason.includes('connectivity_failed')
+        ? 'Túnel VPN encerrado: falha no teste de conectividade. Reconecte.'
+        : normalizedReason === 'process_gone' || normalizedReason === 'pid_gone'
+          ? 'Túnel VPN encerrado: processo OpenVPN não está mais ativo. Reconecte.'
+          : 'Túnel VPN encerrado pelo servidor. Reconecte.';
+      mainWindow.webContents.send('vpn-status', message);
+      mainWindow.webContents.send('vpn-log', `❌ Health-check VPN: ${message}\n`);
     }
     logger.log('VPN', 'TUNNEL_HEALTH_CHECK_DISCONNECTED', { reason }, 'WARN');
   };
@@ -1291,7 +1302,7 @@ function startTunnelHealthCheck() {
     if (!vpnConnectionActive) return;
 
     const pid = getTrackedVpnPid();
-    const pidAlive = pid ? isPidAlive(pid) : false;
+    const pidAlive = pid ? isVpnPidRunning(pid) : false;
 
     if (!pidAlive) {
       const ifaceState = detectLocalVpnInterfaceState();
@@ -1300,11 +1311,17 @@ function startTunnelHealthCheck() {
         const realPid = refreshTrackedBluepexPid();
         if (realPid) {
           logger.log('VPN', 'TUNNEL_HEALTH_CHECK_PID_UPDATED', { oldPid: pid, newPid: realPid }, 'WARN');
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('vpn-log', `ℹ️ Health-check VPN: processo OpenVPN atualizado (PID ${realPid}).\n`);
+          }
           return;
         }
         // Nenhum PID rastreável encontrado — verificar conectividade antes de declarar desconectado
         const connectivity = await checkTunnelConnectivity(activeTunInterface);
         logger.log('VPN', 'TUNNEL_CONNECTIVITY_CHECK_PID_GONE', { ...connectivity, tunIface: activeTunInterface }, 'WARN');
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('vpn-log', `⚠️ Health-check VPN: processo não localizado; teste de conectividade: ${connectivity.detail}.\n`);
+        }
         if (!connectivity.ok) {
           declareDisconnected('pid_gone_connectivity_failed:' + connectivity.detail);
         } else {
@@ -1318,6 +1335,9 @@ function startTunnelHealthCheck() {
 
     const connectivity = await checkTunnelConnectivity(activeTunInterface);
     logger.log('VPN', 'TUNNEL_CONNECTIVITY_CHECK', { ...connectivity, tunIface: activeTunInterface });
+    if (!connectivity.ok && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('vpn-log', `⚠️ Teste de conectividade VPN falhou: ${connectivity.detail}.\n`);
+    }
     if (!connectivity.ok) {
       declareDisconnected('connectivity_failed:' + connectivity.detail);
     }
@@ -1334,6 +1354,44 @@ function stopTunnelHealthCheck() {
     clearInterval(tunnelHealthCheckInterval);
     tunnelHealthCheckInterval = null;
   }
+  stopShortIdRenewalTimer();
+}
+
+function startShortIdRenewalTimer() {
+  if (shortIdRenewalInterval) return;
+
+  const renew = async () => {
+    if (!vpnConnectionActive || shortIdRenewalInProgress) return;
+
+    shortIdRenewalInProgress = true;
+    try {
+      const cache = readTokenCache();
+      await renewShortIdIfNeeded(cache);
+    } catch (error) {
+      logger.log('AZURE', 'SHORT_ID_RENEW_CACHE_WARN', { error: error.message }, 'WARN');
+    } finally {
+      shortIdRenewalInProgress = false;
+    }
+  };
+
+  const settings = loadAppSettings();
+  const intervalMs = settings.shortIdRenewMinutes && Number(settings.shortIdRenewMinutes) > 0
+    ? Math.max(30 * 1000, Math.min(60 * 1000, Number(settings.shortIdRenewMinutes) * 60 * 1000 / 3))
+    : 60 * 1000;
+
+  shortIdRenewalInterval = setInterval(renew, intervalMs);
+  void renew();
+
+  logger.log('AZURE', 'SHORT_ID_RENEW_TIMER_STARTED', { intervalMs });
+}
+
+function stopShortIdRenewalTimer() {
+  if (shortIdRenewalInterval) {
+    clearInterval(shortIdRenewalInterval);
+    shortIdRenewalInterval = null;
+    logger.log('AZURE', 'SHORT_ID_RENEW_TIMER_STOPPED');
+  }
+  shortIdRenewalInProgress = false;
 }
 
 
@@ -4216,21 +4274,47 @@ async function renewShortIdIfNeeded(cache) {
   const RENEW_MARGIN_MS = Math.min(30 * 60 * 1000, SHORT_ID_TTL_MS * 0.1);
   const generatedAt = cache.short_id_generated_at ? new Date(cache.short_id_generated_at).getTime() : 0;
   const age = Date.now() - generatedAt;
-  if (!cache.short_id || !cache.access_token || !config.server_api) return;
+  if (!cache?.short_id || !cache?.access_token) return;
   if (age < SHORT_ID_TTL_MS - RENEW_MARGIN_MS) return;
   try {
+    const profile = cache.profile_id ? await getAzureProfile(cache.profile_id) : null;
+    const azureConfig = mergeAzureConfig(profile?.azureConfig, config);
+    const serverApi = azureConfig.server_api;
+    if (!serverApi) {
+      logger.log('AZURE', 'SHORT_ID_RENEW_WARN', {
+        username: cache.username,
+        profileId: cache.profile_id || null,
+        reason: 'server_api_missing'
+      }, 'WARN');
+      return;
+    }
     logger.log('AZURE', 'SHORT_ID_RENEW_START', { age: Math.round(age / 60000) + 'min', username: cache.username });
-    const resp = await axios.post(config.server_api, { username: cache.username, jwt_token: cache.access_token });
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('vpn-log', '🔄 Renovando chave de autenticação VPN...\n');
+    }
+    const resp = await axios.post(serverApi, { username: cache.username, jwt_token: cache.access_token });
     const newShortId = resp?.data?.short_id || resp?.data?.shortID || resp?.data?.data?.short_id || '';
     if (newShortId) {
       cache.short_id = newShortId;
       cache.shortID = newShortId;
       cache.short_id_generated_at = new Date().toISOString();
+      cache.profile_id = cache.profile_id || profile?.id || null;
       writeTokenCache(cache);
       logger.log('AZURE', 'SHORT_ID_RENEW_OK', { username: cache.username });
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('vpn-log', '✅ Chave de autenticação renovada com sucesso.\n');
+      }
+    } else {
+      logger.log('AZURE', 'SHORT_ID_RENEW_EMPTY', { username: cache.username }, 'WARN');
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('vpn-log', '⚠️ Renovação da chave de autenticação não retornou uma chave válida.\n');
+      }
     }
   } catch (e) {
     logger.log('AZURE', 'SHORT_ID_RENEW_WARN', { error: e.message }, 'WARN');
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('vpn-log', `⚠️ Não foi possível renovar a chave de autenticação: ${e.message}\n`);
+    }
   }
 }
 
@@ -4455,6 +4539,7 @@ ipcMain.handle('connect-openvpn', async () => {
         mainWindow.webContents.send('vpn-connected', { pid: bluepexPid });
         startTunnelHealthCheck();
       }
+      startShortIdRenewalTimer();
       console.log('✅ [Azure] VPN conectada com sucesso!');
       activeHistoryEntry = {
         id: connectionId,
@@ -4644,9 +4729,10 @@ ipcMain.handle('connect-openvpn', async () => {
 
     let replayErrorCount = 0;
     let replayErrorTimer = null;
+    const replayPacketIds = new Set();
 
     const handleAzureServerDisconnect = async (reason, details = {}) => {
-      if (!connectionEstablished || !vpnConnectionActive) return;
+      if (manualDisconnectInProgress || !connectionEstablished || !vpnConnectionActive) return;
       logger.log('VPN', 'AZURE_SERVER_DISCONNECT_DETECTED', { reason, ...details }, 'WARN');
       vpnConnectionActive = false;
       stopTunnelHealthCheck();
@@ -4654,7 +4740,7 @@ ipcMain.handle('connect-openvpn', async () => {
         mainWindow.webContents.send('vpn-status', 'Conexão encerrada pelo servidor. Desconectando...');
       }
       try {
-        await killVPNConnection();
+        await killVPNConnection({ source: 'server' });
       } catch (_) {}
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('vpn-disconnected');
@@ -4662,9 +4748,28 @@ ipcMain.handle('connect-openvpn', async () => {
       }
     };
 
-    const handleReplayStorm = () => handleAzureServerDisconnect('replay_storm', { replayErrorCount });
+    const isAzureServerDisconnectOutput = (text) => /Inactivity timeout \(--ping-restart\)|SIGUSR1\[soft,ping-restart\]|process restarting/i.test(String(text || ''));
 
-    const isAzureServerDisconnectOutput = (text) => /Inactivity timeout \(--ping-restart\)|SIGUSR1\[soft,ping-restart\]|process restarting|Peer Connection Initiated/i.test(String(text || ''));
+    const handleReplayOutput = (text) => {
+      if (!connectionEstablished || !String(text || '').includes('bad packet ID (may be a replay)')) return false;
+      const packetIds = [...String(text).matchAll(/bad packet ID \(may be a replay\).*?\[\s*#(\d+)\s*\]/g)].map((match) => match[1]);
+      const uniquePacketIds = packetIds.filter((packetId) => !replayPacketIds.has(packetId));
+      uniquePacketIds.forEach((packetId) => replayPacketIds.add(packetId));
+      if (!uniquePacketIds.length) return true;
+      replayErrorCount += uniquePacketIds.length;
+      if (replayErrorTimer) clearTimeout(replayErrorTimer);
+      replayErrorTimer = setTimeout(() => {
+        replayErrorCount = 0;
+        replayPacketIds.clear();
+      }, 10000);
+      if (replayErrorCount >= 5 && replayErrorCount - uniquePacketIds.length < 5) {
+        logger.log('VPN', 'REPLAY_STORM_DETECTED', { replayErrorCount }, 'WARN');
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('vpn-log', '⚠️ Muitos pacotes rejeitados por replay; a conexão será mantida para diagnóstico.\n');
+        }
+      }
+      return true;
+    };
 
     vpnProcess.stdout.on('data', (data) => {
       const output = data.toString();
@@ -4678,15 +4783,7 @@ ipcMain.handle('connect-openvpn', async () => {
         return;
       }
 
-      if (connectionEstablished && output.includes('bad packet ID (may be a replay)')) {
-        replayErrorCount++;
-        if (replayErrorTimer) clearTimeout(replayErrorTimer);
-        replayErrorTimer = setTimeout(() => { replayErrorCount = 0; }, 10000);
-        if (replayErrorCount >= 5) {
-          handleReplayStorm();
-          return;
-        }
-      }
+      handleReplayOutput(output);
 
       if (isAzureConnectedOutput(output) && !connectionEstablished) {
         handleAzureConnected('stdout', output);
@@ -4729,14 +4826,8 @@ ipcMain.handle('connect-openvpn', async () => {
       } else if (errorText.includes('AUTH_FAILED')) {
         handleAzureAuthFailure('stderr');
         return;
-      } else if (connectionEstablished && errorText.includes('bad packet ID (may be a replay)')) {
-        replayErrorCount++;
-        if (replayErrorTimer) clearTimeout(replayErrorTimer);
-        replayErrorTimer = setTimeout(() => { replayErrorCount = 0; }, 10000);
-        if (replayErrorCount >= 5) {
-          handleReplayStorm();
-          return;
-        }
+      } else if (handleReplayOutput(errorText)) {
+        lastErrorOutput = 'OpenVPN rejeitou pacote replay; conexão mantida para diagnóstico.';
       } else if (errorText.trim()) {
         lastErrorOutput = errorText.trim().split('\n').pop();
       }
@@ -4814,11 +4905,13 @@ ipcMain.handle('connect-openvpn', async () => {
 // ============ DESCONEXÃO VPN ============
 
 // Função para matar a conexão VPN (MESMA DO FECHAR)
-async function killVPNConnection() {
+async function killVPNConnection(options = {}) {
+  const source = options.source || 'manual';
+  if (source === 'manual') manualDisconnectInProgress = true;
   console.log('🔌 MATANDO CONEXÃO VPN (MÉTODO DO FECHAR)...');
   suppressNextReconnect = true;
 
-  if (mainWindow && !mainWindow.isDestroyed()) {
+  if (source === 'manual' && mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('vpn-log', '⚠️ Desconexão solicitada pelo usuário\n');
   }
 
@@ -4890,6 +4983,7 @@ async function killVPNConnection() {
       }
       vpnConnectionActive = false;
       clearBluepexConnectionMeta();
+      if (source === 'manual') manualDisconnectInProgress = false;
       return { success: true, skipped: true, reason: 'no_tracked_bluepex_session' };
     }
 
@@ -5092,6 +5186,7 @@ async function killVPNConnection() {
 
     vpnProcess = null;
     vpnConnectionActive = false;
+    if (source === 'manual') manualDisconnectInProgress = false;
     currentOvpnPath = null;
     currentElevationMethod = null;
     clearBluepexConnectionMeta();
@@ -5101,6 +5196,7 @@ async function killVPNConnection() {
 
   } catch (error) {
     console.error('❌ Erro ao matar conexão VPN:', error);
+    if (source === 'manual') manualDisconnectInProgress = false;
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('vpn-log', `❌ Erro na desconexão: ${error.message}\n`);
     }
@@ -5158,14 +5254,20 @@ ipcMain.handle('kill-vpn-connection', async () => {
   // RF010: cancelar reconexão automática quando usuário desconectar manualmente via kill-vpn-connection
   cancelReconnect();
   suppressNextReconnect = true;
-  return await killVPNConnection();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('vpn-status', 'Desconectando da VPN...');
+  }
+  return await killVPNConnection({ source: 'manual' });
 });
 
 ipcMain.handle('disconnect-openvpn', async (event, pid) => {
   console.log(`🔌 [MAIN] Desconexão solicitada via disconnect-openvpn - PID: ${pid}`);
   // RF010: cancelar reconexão automática quando usuário desconectar manualmente
   cancelReconnect();
-  return await killVPNConnection();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('vpn-status', 'Desconectando da VPN...');
+  }
+  return await killVPNConnection({ source: 'manual' });
 });
 
 // RF011: Kill Switch — handlers IPC
@@ -5642,7 +5744,6 @@ function isVpnPidRunning(pid) {
       return output.toLowerCase().includes('openvpn.exe');
     }
 
-    process.kill(pidNumber, 0);
     const processName = execSync(`ps -p ${pidNumber} -o comm=`, {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe']
